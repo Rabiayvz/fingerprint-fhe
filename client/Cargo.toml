@@ -10,5 +10,10 @@ image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bincode = { workspace = true }
+rand = "0.8"
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
 
 # Network (şimdilik file-based, sonra TCP)

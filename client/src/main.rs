@@ -1,288 +1,500 @@
-// client/src/main.rs
-
 mod feature_extraction;
 mod matching;
 
 use feature_extraction::extract_fingerprint_128bit;
-use matching::{hamming_distance, match_fingerprints};
+use matching::hamming_distance;
 
-use shared::{AuthRequest, AuthResponse, Trivium, u64_to_bits_80};
+use shared::{
+    RegisterRequest, RegisterResponse,
+    VerifyRequest, VerifyResponse,
+    Trivium, u64_to_bits_80,
+};
 
 use tfhe::prelude::*;
 use tfhe::{generate_keys, ConfigBuilder, FheBool};
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+// Paths
+const EXCHANGE_DIR: &str = "../exchange";
+const DATA_DIR: &str = "../data";
+
+// Request/Response paths
+const REGISTER_REQ_PATH: &str = "../exchange/register_request.json";
+const REGISTER_RESP_PATH: &str = "../exchange/register_response.json";
+const VERIFY_REQ_PATH: &str = "../exchange/verify_request.json";
+const VERIFY_RESP_PATH: &str = "../exchange/verify_response.json";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔐 FINGERPRINT AUTHENTICATION CLIENT");
     println!("{}", "=".repeat(70));
 
-    // ----------------------------
-    // Paths (keep your folder layout)
-    // ----------------------------
-    let exchange_dir = Path::new("../exchange");
-    let data_dir = Path::new("../data");
-    fs::create_dir_all(exchange_dir)?;
-    fs::create_dir_all(data_dir)?;
-
-    let req_path = exchange_dir.join("auth_request.json");
-    let resp_path = exchange_dir.join("auth_response.json");
-    let server_key_path = exchange_dir.join("server_key.bin");
-
-    // ----------------------------
-    // CLI args
-    // Usage:
-    //   cargo run --release -- auth user_101 ../data/fingerprints/101_1.tif ../data/fingerprints/101_2.tif
-    //
-    // Modes:
-    //   enroll -> only extracts and saves enrolled template locally
-    //   auth   -> runs full pipeline, writes request, reads response, decrypts and verifies
-    // ----------------------------
+    // Parse CLI arguments
     let args: Vec<String> = std::env::args().collect();
-    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("auth");
-    let user_id = args.get(2).cloned().unwrap_or_else(|| "user_101".to_string());
-
-    let enrolled_path = args.get(3).cloned().unwrap_or_else(|| "../data/fingerprints/101_1.tif".to_string());
-    let probe_path    = args.get(4).cloned().unwrap_or_else(|| "../data/fingerprints/101_2.tif".to_string());
-
-    let enrolled_template_path = data_dir.join(format!("{}_enrolled.bin", user_id));
-
-    // ----------------------------
-    // 1) Enrollment (local save)
-    // ----------------------------
-    println!("\n📝 ENROLLMENT PHASE (local save):");
-    println!("{}", "─".repeat(70));
-
-    println!("📷 Extracting enrolled fingerprint ({})...", enrolled_path);
-    let enrolled_bits = extract_fingerprint_128bit(&enrolled_path)?;
-    println!("✅ Enrolled: {} bits extracted", enrolled_bits.len());
-    if enrolled_bits.len() != 128 {
-        return Err(format!("Expected 128-bit feature, got {}", enrolled_bits.len()).into());
-    }
-
-    save_bool_vec(&enrolled_template_path, &enrolled_bits)?;
-    println!("💾 Saved enrolled template: {}", enrolled_template_path.display());
-
-    if mode == "enroll" {
-        println!("\nℹ️ Mode=enroll => only local template saved.");
+    
+    if args.len() < 2 {
+        print_help();
         return Ok(());
     }
 
-    // ----------------------------
-    // 2) Auth - extract probe
-    // ----------------------------
-    println!("\n🔎 AUTH PHASE:");
+    let mode = args[1].as_str();
+
+    match mode {
+        "register" => {
+            if args.len() < 4 {
+                eprintln!("❌ Usage: cargo run --release -- register <user_id> <image_path>");
+                return Ok(());
+            }
+            let user_id = &args[2];
+            let image_path = &args[3];
+            handle_register(user_id, image_path)?;
+        }
+        "verify" => {
+            if args.len() < 4 {
+                eprintln!("❌ Usage: cargo run --release -- verify <user_id> <image_path>");
+                return Ok(());
+            }
+            let user_id = &args[2];
+            let image_path = &args[3];
+            handle_verify(user_id, image_path)?;
+        }
+        "help" | _ => {
+            print_help();
+        }
+    }
+
+    Ok(())
+}
+
+// ==================== REGISTER MODE ====================
+
+fn handle_register(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n📝 REGISTER MODE");
+    println!("{}", "─".repeat(70));
+    println!("👤 User ID: {}", user_id);
+    println!("🖼️  Image: {}", image_path);
+
+    let client_key_path = get_client_key_path();
+    if client_key_path.exists() {
+        println!("🗑️  Removing old client key for testing...");
+        fs::remove_file(&client_key_path)?;
+    }
+
+    // Setup directories
+    fs::create_dir_all(EXCHANGE_DIR)?;
+    fs::create_dir_all(DATA_DIR)?;
+
+    // 1. Feature Extraction
+    println!("\n🔬 FEATURE EXTRACTION:");
+    println!("{}", "─".repeat(70));
+    println!("📷 Extracting fingerprint features...");
+    
+    let fingerprint_bits = extract_fingerprint_128bit(image_path)?;
+    
+    if fingerprint_bits.len() != 128 {
+        return Err(format!("Expected 128 bits, got {}", fingerprint_bits.len()).into());
+    }
+    
+    println!("✅ Extracted {} bits", fingerprint_bits.len());
+
+    // 2. Generate Random Trivium Key/IV
+    println!("\n🔑 TRIVIUM KEY GENERATION:");
+    println!("{}", "─".repeat(70));
+    
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    
+    let key_u64: u64 = rng.gen();
+    let iv_u64: u64 = rng.gen();
+    
+    let key_bits = u64_to_bits_80(key_u64);
+    let iv_bits = u64_to_bits_80(iv_u64);
+    
+    println!("✅ Random key generated: 80 bits");
+    println!("✅ Random IV generated: 80 bits");
+
+    // 3. Trivium Encryption
+    println!("\n🔐 TRIVIUM ENCRYPTION:");
+    println!("{}", "─".repeat(70));
+    
+    let mut trivium = Trivium::new(&key_bits, &iv_bits);
+    let ciphertext = trivium.process(&fingerprint_bits);
+    
+    println!("✅ Fingerprint encrypted: {} bits", ciphertext.len());
+
+    // Sanity check
+    let mut trivium2 = Trivium::new(&key_bits, &iv_bits);
+    let decrypted_local = trivium2.process(&ciphertext);
+    let errors = hamming_distance(&decrypted_local, &fingerprint_bits);
+    
+    if errors != 0 {
+        return Err(format!("Trivium sanity check failed: {} errors", errors).into());
+    }
+    
+    println!("✅ Trivium sanity check passed");
+
+    // 4. FHE Key Management
+    println!("\n🔐 FHE KEY MANAGEMENT:");
+    println!("{}", "─".repeat(70));
+    
+    let client_key_path = get_client_key_path();
+    let server_key_bytes_opt: Option<Vec<u8>>;
+
+    let client_key = if client_key_path.exists() {
+        println!("📂 Loading existing client key...");
+        let key_bytes = fs::read(&client_key_path)?;
+        let key = bincode::deserialize(&key_bytes)?;
+        println!("✅ Client key loaded from: {}", client_key_path.display());
+        server_key_bytes_opt = None; // Server key zaten var
+        key
+    } else {
+        println!("🔑 Generating new FHE keys (first time)...");
+        println!("⏱️  This may take ~10 seconds...");
+        
+        let config = ConfigBuilder::default().build();
+        let (client_key, server_key) = generate_keys(config);
+        
+        // Save client key
+        fs::create_dir_all(client_key_path.parent().unwrap())?;
+        let client_key_bytes = bincode::serialize(&client_key)?;
+        fs::write(&client_key_path, client_key_bytes)?;
+        println!("✅ Client key saved to: {}", client_key_path.display());
+        
+        // Prepare server key for sending
+        let server_key_bytes = bincode::serialize(&server_key)?;
+        server_key_bytes_opt = Some(server_key_bytes);
+        println!("✅ Server key will be sent to server: ({} bytes)", 
+                     server_key_bytes_opt.as_ref().unwrap().len());
+
+        
+        client_key
+    };
+
+    // 5. FHE Encryption (Key & IV)
+    println!("\n🔒 FHE ENCRYPTION:");
+    println!("{}", "─".repeat(70));
+    println!("⏱️  Encrypting Trivium key and IV...");
+    
+    let encrypted_key: Vec<FheBool> = key_bits
+        .iter()
+        .map(|&b| FheBool::encrypt(b, &client_key))
+        .collect();
+    
+    let encrypted_iv: Vec<FheBool> = iv_bits
+        .iter()
+        .map(|&b| FheBool::encrypt(b, &client_key))
+        .collect();
+    
+    let encrypted_key_bytes = bincode::serialize(&encrypted_key)?;
+    let encrypted_iv_bytes = bincode::serialize(&encrypted_iv)?;
+    
+    println!("✅ Encrypted key:  {} bytes", encrypted_key_bytes.len());
+    println!("✅ Encrypted IV:   {} bytes", encrypted_iv_bytes.len());
+
+    // 6. Build and Send Request
+    println!("\n📤 SENDING REQUEST:");
     println!("{}", "─".repeat(70));
 
-    println!("📷 Extracting probe fingerprint ({})...", probe_path);
-    let probe_bits = extract_fingerprint_128bit(&probe_path)?;
-    println!("✅ Probe: {} bits extracted", probe_bits.len());
+    // 🔍 DEBUG
+    println!("🔍 Debug info:");
+    println!("   user_id: {}", user_id);
+    println!("   ciphertext: {} bits", ciphertext.len());
+    println!("   encrypted_key_bytes: {} bytes", encrypted_key_bytes.len());
+    println!("   encrypted_iv_bytes: {} bytes", encrypted_iv_bytes.len());
+    println!("   server_key_bytes: {}", 
+            if server_key_bytes_opt.is_some() { "Some(...)" } else { "None" });
+    
+    let request = RegisterRequest::new(
+        user_id.to_string(),
+        ciphertext,
+        encrypted_key_bytes,
+        encrypted_iv_bytes,
+        server_key_bytes_opt,
+    );
+    
+    let req_json = serde_json::to_string_pretty(&request)?;
+    println!("\n📄 Request JSON:");
+    println!("{}", req_json);
+
+    fs::write(REGISTER_REQ_PATH, req_json)?;
+    
+    println!("✅ Request sent to server!");
+
+    // 7. Wait for Response
+    println!("\n⏳ WAITING FOR RESPONSE:");
+    println!("{}", "─".repeat(70));
+    
+    let response: RegisterResponse = wait_for_response(REGISTER_RESP_PATH, Duration::from_secs(30))?;
+    
+    if response.success {
+        println!("✅ REGISTRATION SUCCESSFUL!");
+        println!("   User ID: {}", response.user_id);
+        println!("   Message: {}", response.message);
+        println!("   Timestamp: {}", response.timestamp);
+    } else {
+        println!("❌ REGISTRATION FAILED!");
+        println!("   Message: {}", response.message);
+    }
+
+    // Cleanup
+    let _ = fs::remove_file(REGISTER_RESP_PATH);
+
+    Ok(())
+}
+
+// ==================== VERIFY MODE ====================
+
+fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n🔍 VERIFY MODE");
+    println!("{}", "─".repeat(70));
+    println!("👤 User ID: {}", user_id);
+    println!("🖼️  Image: {}", image_path);
+
+    // Setup directories
+    fs::create_dir_all(EXCHANGE_DIR)?;
+
+    // 1. Feature Extraction
+    println!("\n🔬 FEATURE EXTRACTION:");
+    println!("{}", "─".repeat(70));
+    println!("📷 Extracting probe fingerprint features...");
+    
+    let probe_bits = extract_fingerprint_128bit(image_path)?;
+    
     if probe_bits.len() != 128 {
-        return Err(format!("Expected 128-bit feature, got {}", probe_bits.len()).into());
+        return Err(format!("Expected 128 bits, got {}", probe_bits.len()).into());
     }
+    
+    println!("✅ Extracted {} bits", probe_bits.len());
 
-    // ----------------------------
-    // 3) Generate TFHE keys
-    // ----------------------------
-    println!("\n🧠 TFHE KEY GENERATION:");
+    // 2. Generate Random Trivium Key/IV (DIFFERENT from enrolled!)
+    println!("\n🔑 TRIVIUM KEY GENERATION:");
     println!("{}", "─".repeat(70));
+    
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    
+    let key_u64: u64 = rng.gen();
+    let iv_u64: u64 = rng.gen();
+    
+    let key_bits = u64_to_bits_80(key_u64);
+    let iv_bits = u64_to_bits_80(iv_u64);
+    
+    println!("✅ Random key generated: 80 bits");
+    println!("✅ Random IV generated: 80 bits");
 
-    let config = ConfigBuilder::default()
-        .build();
-
-    let (client_key, server_key) = generate_keys(config);
-
-    // Export server_key for server side usage
-    let server_key_bytes = bincode::serialize(&server_key)?;
-    fs::write(&server_key_path, server_key_bytes)?;
-    println!("✅ server_key written to: {}", server_key_path.display());
-    println!("🔒 client_key stays in client memory (NOT written).");
-
-    // ----------------------------
-    // 4) Trivium key/IV (80-bit)
-    // ----------------------------
-    println!("\n🔧 TRIVIUM PARAMS:");
+    // 3. Trivium Encryption
+    println!("\n🔐 TRIVIUM ENCRYPTION:");
     println!("{}", "─".repeat(70));
+    
+    let mut trivium = Trivium::new(&key_bits, &iv_bits);
+    let ciphertext = trivium.process(&probe_bits);
+    
+    println!("✅ Probe encrypted: {} bits", ciphertext.len());
 
-    // NOTE: Ensure your shared::u64_to_bits_80 matches server bit ordering expectations.
-    let key_bits_80 = u64_to_bits_80(0x0123_4567_89AB_CDEF);
-    let iv_bits_80  = u64_to_bits_80(0x0F1E_2D3C_4B5A_6978);
-
-    println!("✅ Key bits: {}", key_bits_80.len());
-    println!("✅ IV  bits: {}", iv_bits_80.len());
-
-    // ----------------------------
-    // 5) Plain Trivium encrypt probe -> ciphertext
-    // ----------------------------
-    println!("\n🔐 PLAIN TRIVIUM ENCRYPT:");
+    // 4. Load Client Key
+    println!("\n🔐 FHE KEY LOADING:");
     println!("{}", "─".repeat(70));
-
-    let mut triv = Trivium::new(&key_bits_80, &iv_bits_80);
-    let ciphertext_bits = triv.process(&probe_bits);
-    println!("✅ Ciphertext produced: {} bits", ciphertext_bits.len());
-
-    // Sanity check: decrypt locally to ensure plain Trivium is consistent
-    let mut triv2 = Trivium::new(&key_bits_80, &iv_bits_80);
-    let decrypted_local = triv2.process(&ciphertext_bits);
-    let local_err = hamming_distance(&decrypted_local, &probe_bits);
-    println!("🧪 Local Trivium sanity check errors: {}/{}", local_err, probe_bits.len());
-    if local_err != 0 {
-        return Err("Local Trivium sanity check failed (plain encrypt/decrypt mismatch)".into());
+    
+    let client_key_path = get_client_key_path();
+    
+    if !client_key_path.exists() {
+        return Err("Client key not found! Please register first.".into());
     }
+    
+    let key_bytes = fs::read(&client_key_path)?;
+    let client_key = bincode::deserialize(&key_bytes)?;
+    
+    println!("✅ Client key loaded from: {}", client_key_path.display());
 
-    // ----------------------------
-    // 6) FHE-encrypt key/iv bits + encrypted_true
-    // ----------------------------
-    println!("\n🔐 FHE-ENCRYPT KEY/IV:");
+    // 5. FHE Encryption
+    println!("\n🔒 FHE ENCRYPTION:");
     println!("{}", "─".repeat(70));
-
-    let encrypted_key: Vec<FheBool> = key_bits_80
+    println!("⏱️  Encrypting Trivium key, IV, and constant...");
+    
+    let encrypted_key: Vec<FheBool> = key_bits
         .iter()
         .map(|&b| FheBool::encrypt(b, &client_key))
         .collect();
-
-    let encrypted_iv: Vec<FheBool> = iv_bits_80
+    
+    let encrypted_iv: Vec<FheBool> = iv_bits
         .iter()
         .map(|&b| FheBool::encrypt(b, &client_key))
         .collect();
-
+    
     let encrypted_true = FheBool::encrypt(true, &client_key);
-
-    // Serialize for protocol
+    
     let encrypted_key_bytes = bincode::serialize(&encrypted_key)?;
     let encrypted_iv_bytes = bincode::serialize(&encrypted_iv)?;
     let encrypted_true_bytes = bincode::serialize(&encrypted_true)?;
+    
+    println!("✅ Encrypted key:  {} bytes", encrypted_key_bytes.len());
+    println!("✅ Encrypted IV:   {} bytes", encrypted_iv_bytes.len());
+    println!("✅ Encrypted true: {} bytes", encrypted_true_bytes.len());
 
-    println!("✅ encrypted_key_bytes size: {}", encrypted_key_bytes.len());
-    println!("✅ encrypted_iv_bytes  size: {}", encrypted_iv_bytes.len());
-    println!("✅ encrypted_true_bytes size: {}", encrypted_true_bytes.len());
-
-    // ----------------------------
-    // 7) Build & write AuthRequest (JSON)
-    // ----------------------------
-    println!("\n📤 Sending to server (file-based demo)...");
+    // 6. Build and Send Request
+    println!("\n📤 SENDING REQUEST:");
     println!("{}", "─".repeat(70));
-
-    let req = AuthRequest::new(
-        ciphertext_bits.clone(),
+    
+    let request = VerifyRequest::new(
+        user_id.to_string(),
+        ciphertext,
         encrypted_key_bytes,
         encrypted_iv_bytes,
         encrypted_true_bytes,
-        user_id.clone(),
     );
+    
+    let req_json = serde_json::to_string_pretty(&request)?;
+    fs::write(VERIFY_REQ_PATH, req_json)?;
+    
+    println!("✅ Request sent to server!");
+    println!("⚠️  Server will perform FHE operations (~30-60 minutes)");
 
-    write_json(&req_path, &req)?;
-    println!("✅ Request sent! -> {}", req_path.display());
-
-    // ----------------------------
-    // 8) Read AuthResponse
-    // ----------------------------
-    println!("\n⏳ Waiting for server response...");
-    let resp: AuthResponse = wait_and_read_json(&resp_path, Duration::from_secs(15000))?;
-    println!("✅ Response received!");
-
-    if let Some(m) = resp.server_match {
-        println!("🧾 Server match: {}", m);
-    }
-    if let Some(d) = resp.distance {
-        println!("📏 Server distance: {}", d);
-    }
-
-    // ----------------------------
-    // 9) Decrypt result and verify against original probe bits
-    // ----------------------------
-    println!("\n🔓 Decrypting result...");
+    // 7. Wait for Response
+    println!("\n⏳ WAITING FOR RESPONSE:");
     println!("{}", "─".repeat(70));
-
-    // Server returns encrypted_result: Vec<u8> representing bincode(Vec<FheBool>)
-    let encrypted_plaintext_bits: Vec<FheBool> = bincode::deserialize(&resp.encrypted_result)?;
-    if encrypted_plaintext_bits.len() != probe_bits.len() {
-        return Err(format!(
-            "Server returned {} bits, expected {}",
-            encrypted_plaintext_bits.len(),
-            probe_bits.len()
-        ).into());
+    println!("This may take a very long time...");
+    
+    let response: VerifyResponse = wait_for_response(VERIFY_RESP_PATH, Duration::from_secs(7200))?; // 2 hours timeout
+    
+    if !response.success {
+        println!("❌ VERIFICATION FAILED!");
+        return Ok(());
     }
 
-    let plaintext_from_server: Vec<bool> = encrypted_plaintext_bits
+    // 8. Decrypt Results
+    println!("\n🔓 DECRYPTING RESULTS:");
+    println!("{}", "─".repeat(70));
+    
+    let encrypted_match: FheBool = bincode::deserialize(&response.encrypted_match_bytes)?;
+    let encrypted_distance: Vec<FheBool> = bincode::deserialize(&response.encrypted_distance_bytes)?;
+    
+    let match_result: bool = encrypted_match.decrypt(&client_key);
+    let distance_bits: Vec<bool> = encrypted_distance
         .iter()
         .map(|b| b.decrypt(&client_key))
         .collect();
-
-    let errors = hamming_distance(&plaintext_from_server, &probe_bits);
-
-    println!("✅ VERIFICATION:");
-    println!("{}", "─".repeat(70));
-    println!("Decryption errors: {}/{} bits", errors, probe_bits.len());
-
-    if errors == 0 {
-        println!("✅ Decryption successful!");
+    
+    // Convert 8-bit binary to decimal
+    let distance = bits_to_usize(&distance_bits);
+    let similarity = 1.0 - (distance as f32 / 128.0);
+    
+    // 9. Display Results
+    println!("\n{}", "═".repeat(70));
+    if match_result {
+        println!("✅ AUTHENTICATION SUCCESSFUL!");
     } else {
-        println!("❌ Decryption failed!");
+        println!("❌ AUTHENTICATION FAILED!");
     }
+    println!("{}", "═".repeat(70));
+    println!("User ID:          {}", user_id);
+    println!("Match Result:     {}", match_result);
+    println!("Hamming Distance: {}/128 bits", distance);
+    println!("Similarity:       {:.2}%", similarity * 100.0);
+    println!("Threshold:        70%");
+    println!("Timestamp:        {}", response.timestamp);
+    
+    // Debug info (if available)
+    if let Some(debug_match) = response.debug_server_match {
+        println!("\n🚨 DEBUG INFO (Server-side):");
+        println!("   Server Match:    {}", debug_match);
+        if let Some(debug_dist) = response.debug_server_distance {
+            println!("   Server Distance: {}/128", debug_dist);
+        }
+    }
+    
+    println!("{}", "═".repeat(70));
 
-    // Optional local match demo with enrolled template (plaintext on client)
-    println!("\n🧾 OPTIONAL LOCAL MATCH (demo):");
-    println!("{}", "─".repeat(70));
-    if enrolled_template_path.exists() {
-        let enrolled_loaded = load_bool_vec(&enrolled_template_path)?;
-        let dist = hamming_distance(&plaintext_from_server, &enrolled_loaded);
-        let ok = match_fingerprints(&plaintext_from_server, &enrolled_loaded, 0.7);
-        println!("Hamming distance (server-plaintext vs enrolled): {}", dist);
-        println!("Match decision (client-local demo): {}", ok);
-    } else {
-        println!("(No enrolled template found at {})", enrolled_template_path.display());
-    }
+    // Cleanup
+    let _ = fs::remove_file(VERIFY_RESP_PATH);
 
     Ok(())
 }
 
-// ----------------------------
-// Helpers
-// ----------------------------
+// ==================== HELPERS ====================
 
-fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn std::error::Error>> {
-    let json = serde_json::to_vec_pretty(value)?;
-    fs::write(path, json)?;
-    Ok(())
+fn print_help() {
+    println!(r#"
+🔐 TRANSCIPHERING FINGERPRINT AUTHENTICATION CLIENT
+
+USAGE:
+  cargo run --release -- <MODE> <USER_ID> <IMAGE_PATH>
+
+MODES:
+  register   Register a new fingerprint template
+  verify     Verify a fingerprint against enrolled template
+  help       Show this help message
+
+EXAMPLES:
+  # Register a new user
+  cargo run --release -- register user_123 ../data/fingerprints/101_1.tif
+
+  # Verify user authentication
+  cargo run --release -- verify user_123 ../data/fingerprints/101_2.tif
+
+NOTES:
+  - Client key is stored at: ~/.fingerprint_client/client_key.bin
+  - Server key is sent only during first registration
+  - Verification can take 30-60 minutes due to FHE operations
+    "#);
 }
 
-fn wait_and_read_json<T: for<'de> serde::Deserialize<'de>>(
-    path: &Path,
+fn get_client_key_path() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        Path::new(&appdata).join("fingerprint_client").join("client_key.bin")
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        Path::new(&home).join(".fingerprint_client").join("client_key.bin")
+    }
+}
+
+fn wait_for_response<T: for<'de> serde::Deserialize<'de>>(
+    path: &str,
     timeout: Duration,
 ) -> Result<T, Box<dyn std::error::Error>> {
     let start = Instant::now();
+    let path = Path::new(path);
+    
     loop {
         if path.exists() {
-            let data = fs::read(path)?;
-            // Retry once if parse fails (server may be writing)
-            match serde_json::from_slice::<T>(&data) {
-                Ok(v) => return Ok(v),
-                Err(_) => {
-                    std::thread::sleep(Duration::from_millis(150));
-                    let data2 = fs::read(path)?;
-                    let v2 = serde_json::from_slice::<T>(&data2)?;
-                    return Ok(v2);
+            // Wait a bit for file to be fully written
+            std::thread::sleep(Duration::from_millis(200));
+            
+            let data = fs::read_to_string(path)?;
+            
+            match serde_json::from_str::<T>(&data) {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    // Retry once
+                    std::thread::sleep(Duration::from_millis(200));
+                    let data2 = fs::read_to_string(path)?;
+                    let response2 = serde_json::from_str::<T>(&data2)
+                        .map_err(|_| format!("Failed to parse response: {}", e))?;
+                    return Ok(response2);
                 }
             }
         }
 
         if start.elapsed() > timeout {
-            return Err(format!("Timeout waiting for {}", path.display()).into());
+            return Err(format!("Timeout waiting for response ({}s)", timeout.as_secs()).into());
         }
-        std::thread::sleep(Duration::from_millis(200));
+
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
-fn save_bool_vec(path: &Path, v: &[bool]) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = bincode::serialize(v)?;
-    fs::write(path, bytes)?;
-    Ok(())
-}
-
-fn load_bool_vec(path: &Path) -> Result<Vec<bool>, Box<dyn std::error::Error>> {
-    let bytes = fs::read(path)?;
-    Ok(bincode::deserialize(&bytes)?)
+fn bits_to_usize(bits: &[bool]) -> usize {
+    let mut result = 0;
+    for (i, &bit) in bits.iter().enumerate() {
+        if bit {
+            result += 1 << i;
+        }
+    }
+    result
 }

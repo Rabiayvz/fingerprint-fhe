@@ -1,182 +1,332 @@
-// server/src/main.rs
+mod database;
 
-mod fhe_operations; // (ister kullan ister kullanma; şimdilik kalabilir)
-
-use shared::{AuthRequest, AuthResponse, decrypt_homomorphic};
+use database::{Database, TemplateEntry};
+use shared::{
+    RegisterRequest, RegisterResponse,
+    VerifyRequest, VerifyResponse,
+    decrypt_homomorphic,
+    diff_bits, popcount_128, leq_constant,
+};
 
 use tfhe::{set_server_key, ServerKey, FheBool};
-
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
 const EXCHANGE_DIR: &str = "../exchange";
-const REQ_PATH: &str = "../exchange/auth_request.json";
-const RESP_PATH: &str = "../exchange/auth_response.json";
-const RESP_TMP_PATH: &str = "../exchange/auth_response.json.tmp";
-const SERVER_KEY_PATH: &str = "../exchange/server_key.bin";
+const SERVER_KEY_PATH: &str = "../database/server_key.bin";
+
+// Request/Response paths
+const REGISTER_REQ_PATH: &str = "../exchange/register_request.json";
+const REGISTER_RESP_PATH: &str = "../exchange/register_response.json";
+const VERIFY_REQ_PATH: &str = "../exchange/verify_request.json";
+const VERIFY_RESP_PATH: &str = "../exchange/verify_response.json";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🖥️  FINGERPRINT AUTHENTICATION SERVER");
     println!("{}", "=".repeat(70));
-
+    
     fs::create_dir_all(EXCHANGE_DIR)?;
+    fs::create_dir_all("../database")?;
 
-    println!("\n⏳ Waiting for authentication request...");
+    println!("\n⏳ Waiting for requests...\n");
+
     loop {
-        match check_for_request() {
-            Ok((auth_req, server_key)) => {
-                println!("\n📥 Request received from user: {}", auth_req.user_id);
-
-                // Important: set TFHE server key for homomorphic ops
-                set_server_key(server_key.clone());
-
-                // --- Deserialize incoming FHE data ---
-                println!("🔐 Deserializing FHE data...");
-                println!("   ciphertext bits: {}", auth_req.ciphertext.len());
-                println!("   encrypted_key_bytes size: {} bytes", auth_req.encrypted_key_bytes.len());
-                println!("   encrypted_iv_bytes  size: {} bytes", auth_req.encrypted_iv_bytes.len());
-                println!("   encrypted_true_bytes size: {} bytes", auth_req.encrypted_true_bytes.len());
-
-                let encrypted_key: Vec<FheBool> = match bincode::deserialize::<Vec<FheBool>>(&auth_req.encrypted_key_bytes) {
-                    Ok(v) => {
-                        println!("   ✅ encrypted_key deserialized: {} bits", v.len());
-                        v
-                    }
-                    Err(e) => {
-                        eprintln!("❌ Failed to deserialize encrypted_key: {}", e);
-                        cleanup_on_error();
-                        sleep_tick();
-                        continue;
-                    }
-                };
-
-                let encrypted_iv: Vec<FheBool> = match bincode::deserialize::<Vec<FheBool>>(&auth_req.encrypted_iv_bytes) {
-                    Ok(v) => {
-                        println!("   ✅ encrypted_iv deserialized: {} bits", v.len());
-                        v
-                    }
-                    Err(e) => {
-                        eprintln!("❌ Failed to deserialize encrypted_iv: {}", e);
-                        cleanup_on_error();
-                        sleep_tick();
-                        continue;
-                    }
-                };
-
-                let encrypted_true: FheBool = match bincode::deserialize::<FheBool>(&auth_req.encrypted_true_bytes) {
-                    Ok(v) => {
-                        println!("   ✅ encrypted_true deserialized!");
-                        v
-                    }
-                    Err(e) => {
-                        eprintln!("❌ Failed to deserialize encrypted_true: {}", e);
-                        cleanup_on_error();
-                        sleep_tick();
-                        continue;
-                    }
-                };
-
-                // --- Homomorphic decryption ---
-                println!("\n🔓 Starting homomorphic decryption...");
-                println!("⚠️  Depending on parameters, this can take a while.\n");
-
-                let decrypted_encrypted: Vec<FheBool> = decrypt_homomorphic(
-                    &auth_req.ciphertext,
-                    &encrypted_key,
-                    &encrypted_iv,
-                    &encrypted_true,
-                    &server_key,
-                );
-
-                // Serialize result: Vec<FheBool> -> Vec<u8>
-                println!("\n📦 Serializing result...");
-                let encrypted_result_bytes = match bincode::serialize(&decrypted_encrypted) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("❌ Failed to serialize decrypted result: {}", e);
-                        cleanup_on_error();
-                        sleep_tick();
-                        continue;
-                    }
-                };
-
-                // Build response (protocol.rs ile birebir)
-                let auth_resp = AuthResponse::new(encrypted_result_bytes);
-                // İstersen server-side matching ekleyince:
-                // let auth_resp = auth_resp.with_match(matched, distance);
-
-                // Send response atomically (tmp -> rename)
-                println!("📤 Sending response...");
-                if let Err(e) = send_response_atomic(&auth_resp) {
-                    eprintln!("❌ Failed to send response: {}", e);
-                    cleanup_on_error();
-                    sleep_tick();
-                    continue;
-                }
-                println!("✅ Response sent -> {}", RESP_PATH);
-
-                // Cleanup consumed request artifacts
-                cleanup_after_success();
-
-                println!("\n✅ Authentication complete!");
-                println!("⏳ Waiting for next request...");
+        // Check for register request
+        if Path::new(REGISTER_REQ_PATH).exists() {
+            println!("\n📥 REGISTER REQUEST DETECTED");
+            println!("{}", "─".repeat(70));
+            
+            match handle_register() {
+                Ok(_) => println!("✅ Register completed successfully!"),
+                Err(e) => eprintln!("❌ Register failed: {}", e),
             }
-            Err(_) => {
-                // No request yet, just wait
-                sleep_tick();
+            
+            println!("\n⏳ Waiting for next request...\n");
+        }
+
+        // Check for verify request
+        if Path::new(VERIFY_REQ_PATH).exists() {
+            println!("\n📥 VERIFY REQUEST DETECTED");
+            println!("{}", "─".repeat(70));
+            
+            match handle_verify() {
+                Ok(_) => println!("✅ Verify completed successfully!"),
+                Err(e) => eprintln!("❌ Verify failed: {}", e),
             }
+            
+            println!("\n⏳ Waiting for next request...\n");
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+// ==================== REGISTER HANDLER ====================
+
+fn handle_register() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Read request
+    let req_json = fs::read_to_string(REGISTER_REQ_PATH)?;
+    let req: RegisterRequest = serde_json::from_str(&req_json)?;
+    
+    println!("👤 User ID: {}", req.user_id);
+    println!("📊 Ciphertext: {} bits", req.ciphertext.len());
+    
+    // 2. Load/Save server key
+    if let Some(ref server_key_bytes) = req.server_key_bytes {
+        println!("🔑 Saving server key (first registration)...");
+        fs::write(SERVER_KEY_PATH, server_key_bytes)?;
+        println!("✅ Server key saved to: {}", SERVER_KEY_PATH);
+    } else {
+        if !Path::new(SERVER_KEY_PATH).exists() {
+            // ❌ CLEANUP BEFORE ERROR
+            let _ = fs::remove_file(REGISTER_REQ_PATH);
+            return Err("Server key not found and not provided in request!".into());
+        }
+        println!("✅ Server key already exists");
+    }
+    
+    // 3. Load database - ✅ HATA YAKALA
+    let mut db = match Database::load() {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("❌ Database load failed: {}", e);
+            eprintln!("🔧 Creating fresh database...");
+            
+            // Backup corrupt database
+            if Path::new("../database/templates.json").exists() {
+                let backup_path = format!("../database/templates.json.backup.{}", 
+                    chrono::Utc::now().timestamp());
+                let _ = fs::rename("../database/templates.json", &backup_path);
+                println!("📦 Corrupt database backed up to: {}", backup_path);
+            }
+            
+            // Create fresh database
+            let fresh_db = Database {
+                version: "1.0".to_string(),
+                templates: std::collections::HashMap::new(),
+            };
+            fresh_db.save()?;
+            fresh_db
+        }
+    };
+    
+    // 4. Check if user already exists
+    if db.exists(&req.user_id) {
+        println!("⚠️  User already exists, updating...");
+    }
+    
+    // 5. Vec<bool> -> Vec<u8> dönüşümü
+    let ciphertext_bytes = bools_to_bytes(&req.ciphertext);
+    
+    // 6. Create template entry
+    let entry = TemplateEntry::new(
+        req.user_id.clone(),
+        ciphertext_bytes,
+        req.encrypted_key_bytes,
+        req.encrypted_iv_bytes,
+    );
+    
+    // 7. Insert into database
+    db.insert(entry);
+    
+    // ✅ SAVE BEFORE RESPONSE
+    match db.save() {
+        Ok(_) => {
+            println!("💾 Template saved to database");
+            println!("📈 Total templates: {}", db.templates.len());
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to save database: {}", e);
+            // ❌ CLEANUP AND RETURN ERROR
+            let _ = fs::remove_file(REGISTER_REQ_PATH);
+            return Err(format!("Database save failed: {}", e).into());
         }
     }
-}
-
-fn check_for_request() -> Result<(AuthRequest, ServerKey), Box<dyn std::error::Error>> {
-    if !Path::new(REQ_PATH).exists() || !Path::new(SERVER_KEY_PATH).exists() {
-        return Err("No request".into());
-    }
-
-    // Read request JSON
-    let req_json = fs::read_to_string(REQ_PATH)?;
-    let req: AuthRequest = serde_json::from_str(&req_json)?;
-
-    // Read server key bytes
-    let sk_bytes = fs::read(SERVER_KEY_PATH)?;
-    let server_key: ServerKey = bincode::deserialize::<ServerKey>(&sk_bytes)?;
-
-    Ok((req, server_key))
-}
-
-fn send_response_atomic(resp: &AuthResponse) -> Result<(), Box<dyn std::error::Error>> {
-    let resp_json = serde_json::to_string(resp)?;
-
-    // write tmp
-    fs::write(RESP_TMP_PATH, resp_json)?;
-
-    // atomic-ish replace
-    // On Windows, rename may fail if target exists; remove first.
-    if Path::new(RESP_PATH).exists() {
-        let _ = fs::remove_file(RESP_PATH);
-    }
-    fs::rename(RESP_TMP_PATH, RESP_PATH)?;
-
+    
+    // 8. Send response
+    let resp = RegisterResponse::success(req.user_id);
+    let resp_json = serde_json::to_string_pretty(&resp)?;
+    fs::write(REGISTER_RESP_PATH, resp_json)?;
+    
+    println!("📤 Response sent!");
+    
+    // 9. Cleanup - ✅ HER DURUMDA SİL
+    let _ = fs::remove_file(REGISTER_REQ_PATH);
+    
     Ok(())
 }
 
-fn cleanup_after_success() {
-    // Request processed; remove request + server key
-    let _ = fs::remove_file(REQ_PATH);
-    let _ = fs::remove_file(SERVER_KEY_PATH);
-    // Leave response for client to read
+// ==================== VERIFY HANDLER ====================
+
+fn handle_verify() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Read request
+    let req_json = fs::read_to_string(VERIFY_REQ_PATH)?;
+    let req: VerifyRequest = serde_json::from_str(&req_json)?;
+    
+    println!("👤 User ID: {}", req.user_id);
+    println!("📊 Probe ciphertext: {} bits", req.ciphertext.len());
+    
+    // 2. Load server key
+    if !Path::new(SERVER_KEY_PATH).exists() {
+        return Err("Server key not found! Register a user first.".into());
+    }
+    
+    let server_key_bytes = fs::read(SERVER_KEY_PATH)?;
+    let server_key: ServerKey = bincode::deserialize(&server_key_bytes)?;
+    set_server_key(server_key.clone());
+    
+    println!("✅ Server key loaded");
+    
+    // 3. Load database and find enrolled template
+    let db = Database::load()?;
+    
+    let enrolled = match db.get(&req.user_id) {
+        Some(e) => e,
+        None => {
+            let resp = VerifyResponse::error(format!("User '{}' not found in database", req.user_id));
+            let resp_json = serde_json::to_string_pretty(&resp)?;
+            fs::write(VERIFY_RESP_PATH, resp_json)?;
+            fs::remove_file(VERIFY_REQ_PATH)?;
+            return Err(format!("User '{}' not registered", req.user_id).into());
+        }
+    };
+    
+    println!("✅ Enrolled template found");
+    println!("   Created: {}", enrolled.created_at);
+    
+    // 4. Deserialize FHE data
+    println!("\n🔓 Deserializing FHE data...");
+    
+    let encrypted_key_enrolled: Vec<FheBool> = bincode::deserialize(&enrolled.encrypted_key_bytes)?;
+    let encrypted_iv_enrolled: Vec<FheBool> = bincode::deserialize(&enrolled.encrypted_iv_bytes)?;
+    let encrypted_key_probe: Vec<FheBool> = bincode::deserialize(&req.encrypted_key_bytes)?;
+    let encrypted_iv_probe: Vec<FheBool> = bincode::deserialize(&req.encrypted_iv_bytes)?;
+    let encrypted_true: FheBool = bincode::deserialize(&req.encrypted_true_bytes)?;
+    
+    println!("✅ FHE data deserialized:");
+    println!("   Enrolled key: {} bits", encrypted_key_enrolled.len());
+    println!("   Enrolled IV:  {} bits", encrypted_iv_enrolled.len());
+    println!("   Probe key:    {} bits", encrypted_key_probe.len());
+    println!("   Probe IV:     {} bits", encrypted_iv_probe.len());
+    
+    // 5. FHE-Trivium decrypt (ENROLLED)
+    println!("\n🔐 FHE-Trivium decrypting ENROLLED fingerprint...");
+    println!("⚠️  This will take ~15-30 minutes!");
+    
+    // Vec<u8> -> Vec<bool> dönüşümü
+    let enrolled_ciphertext_bools = bytes_to_bools(&enrolled.ciphertext);
+    
+    let plaintext_enrolled_fhe = decrypt_homomorphic(
+        &enrolled_ciphertext_bools,
+        &encrypted_key_enrolled,
+        &encrypted_iv_enrolled,
+        &encrypted_true,
+        &server_key,
+    );
+    
+    println!("✅ Enrolled fingerprint decrypted (still encrypted!)");
+    
+    // 6. FHE-Trivium decrypt (PROBE)
+    println!("\n🔐 FHE-Trivium decrypting PROBE fingerprint...");
+    println!("⚠️  This will take another ~15-30 minutes!");
+    
+    let plaintext_probe_fhe = decrypt_homomorphic(
+        &req.ciphertext,
+        &encrypted_key_probe,
+        &encrypted_iv_probe,
+        &encrypted_true,
+        &server_key,
+    );
+    
+    println!("✅ Probe fingerprint decrypted (still encrypted!)");
+    
+    // 7. FHE Matching
+    println!("\n🧬 FHE Matching (computing Hamming distance)...");
+    
+    // 7a. XOR difference
+    let diff = diff_bits(&plaintext_enrolled_fhe, &plaintext_probe_fhe);
+    println!("   ✅ Difference bits computed");
+    
+    // 7b. Popcount (Hamming distance)
+    let distance_fhe = popcount_128(&diff, &encrypted_true);
+    println!("   ✅ Hamming distance computed (8-bit encrypted counter)");
+    
+    // 7c. Threshold comparison (70% similarity = max 38 bits difference)
+    let threshold = (128.0 * 0.3) as usize; // 30% difference = 70% similarity
+    let match_result_fhe = leq_constant(&distance_fhe, threshold, &encrypted_true);
+    println!("   ✅ Threshold comparison done (threshold: {} bits)", threshold);
+    
+    // 8. Serialize encrypted results
+    println!("\n📦 Serializing results...");
+    
+    let encrypted_match_bytes = bincode::serialize(&match_result_fhe)?;
+    let encrypted_distance_bytes = bincode::serialize(&distance_fhe)?;
+    
+    println!("✅ Results serialized:");
+    println!("   Match bytes:    {} bytes", encrypted_match_bytes.len());
+    println!("   Distance bytes: {} bytes", encrypted_distance_bytes.len());
+    
+    // 9. Create response
+    let resp = VerifyResponse::success(encrypted_match_bytes, encrypted_distance_bytes);
+    
+    // 🚫 DEBUG MODE - UNCOMMENT ONLY FOR TESTING
+    // WARNING: This reveals plaintext to server!
+    /*
+    let debug_match = match_result_fhe.decrypt(&server_key);  // ❌ DON'T DO THIS!
+    let debug_distance_bits: Vec<bool> = distance_fhe.iter()
+        .map(|b| b.decrypt(&server_key))
+        .collect();
+    let debug_distance = bits_to_usize(&debug_distance_bits);
+    let resp = resp.with_debug(debug_match, debug_distance);
+    println!("🚨 DEBUG: Match = {}, Distance = {}", debug_match, debug_distance);
+    */
+    
+    // 10. Send response
+    let resp_json = serde_json::to_string_pretty(&resp)?;
+    fs::write(VERIFY_RESP_PATH, resp_json)?;
+    
+    println!("\n📤 Response sent!");
+    
+    // 11. Cleanup
+    fs::remove_file(VERIFY_REQ_PATH)?;
+    
+    Ok(())
 }
 
-fn cleanup_on_error() {
-    // Avoid getting stuck on a corrupt request forever.
-    // In demos it's often better to delete and wait for next.
-    // If you prefer, comment these out.
-    let _ = fs::remove_file(REQ_PATH);
-    let _ = fs::remove_file(SERVER_KEY_PATH);
+// Helper: Convert 8-bit binary to usize (for debug)
+#[allow(dead_code)]
+fn bits_to_usize(bits: &[bool]) -> usize {
+    let mut result = 0;
+    for (i, &bit) in bits.iter().enumerate() {
+        if bit {
+            result += 1 << i;
+        }
+    }
+    result
 }
 
-fn sleep_tick() {
-    std::thread::sleep(Duration::from_millis(400));
+// Yardımcı fonksiyonlar: bool ve byte dönüşümleri
+fn bools_to_bytes(bools: &[bool]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for chunk in bools.chunks(8) {
+        let mut byte = 0u8;
+        for (i, &bit) in chunk.iter().enumerate() {
+            if bit {
+                byte |= 1 << i;
+            }
+        }
+        bytes.push(byte);
+    }
+    bytes
+}
+
+fn bytes_to_bools(bytes: &[u8]) -> Vec<bool> {
+    let mut bools = Vec::new();
+    for &byte in bytes {
+        for i in 0..8 {
+            bools.push((byte & (1 << i)) != 0);
+        }
+    }
+    bools
 }
