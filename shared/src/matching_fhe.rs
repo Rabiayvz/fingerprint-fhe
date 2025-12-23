@@ -1,6 +1,6 @@
 // shared/src/matching_fhe.rs
 use tfhe::prelude::*;
-use tfhe::{FheBool};
+use tfhe::FheBool;
 
 #[inline]
 fn fhe_not(x: &FheBool, fhe_true: &FheBool) -> FheBool {
@@ -20,15 +20,15 @@ pub fn diff_bits(a: &[FheBool], b: &[FheBool]) -> Vec<FheBool> {
 }
 
 /// Popcount for diff bits into an encrypted binary counter (LSB-first).
-/// For 128 bits, 8 bits are enough (0..128).
-pub fn popcount_128(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
-    assert_eq!(diff.len(), 128);
+/// For 256 bits, 9 bits are enough (0..256).
+pub fn popcount_256(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
+    assert_eq!(diff.len(), 256, "Expected 256 bits for popcount_256");
 
     let fhe_false = fhe_true ^ fhe_true;
-    let mut acc = vec![fhe_false.clone(); 8]; // 8-bit counter
+    let mut acc = vec![fhe_false.clone(); 9]; // 9-bit counter (0-256 range)
 
     for bit in diff.iter() {
-        // Add 1-bit value `bit` into binary accumulator.
+        // Add 1-bit value `bit` into binary accumulator (ripple-carry adder)
         let mut carry = bit.clone();
         for i in 0..acc.len() {
             let sum = &acc[i] ^ &carry;
@@ -36,10 +36,22 @@ pub fn popcount_128(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
             acc[i] = sum;
             carry = new_carry;
         }
-        // overflow ignored (max 128 fits in 8 bits)
+        // overflow ignored (max 256 fits in 9 bits)
     }
 
     acc
+}
+
+/// Backward compatibility: popcount_128 redirects to popcount_256 with padding
+pub fn popcount_128(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
+    if diff.len() == 128 {
+        // Pad to 256 bits with zeros (false)
+        let fhe_false = fhe_true ^ fhe_true;
+        let mut padded = diff.to_vec();
+        padded.extend(vec![fhe_false.clone(); 128]);
+        return popcount_256(&padded, fhe_true);
+    }
+    popcount_256(diff, fhe_true)
 }
 
 /// Compute (distance <= threshold) where distance is encrypted bits (LSB-first),

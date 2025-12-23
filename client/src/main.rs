@@ -93,8 +93,8 @@ fn handle_register(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::e
     
     let fingerprint_bits = extract_fingerprint_128bit(image_path)?;
     
-    if fingerprint_bits.len() != 128 {
-        return Err(format!("Expected 128 bits, got {}", fingerprint_bits.len()).into());
+    if fingerprint_bits.len() != 256 {
+        return Err(format!("Expected 256 bits, got {}", fingerprint_bits.len()).into());
     }
     
     println!("✅ Extracted {} bits", fingerprint_bits.len());
@@ -214,10 +214,11 @@ fn handle_register(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::e
         server_key_bytes_opt,
     );
     
-    let req_json = serde_json::to_string_pretty(&request)?;
-    println!("\n📄 Request JSON:");
-    println!("{}", req_json);
+    // let req_json = serde_json::to_string_pretty(&request)?;  // ⬅️ YORUM SATIRI YAP
+    // println!("\n📄 Request JSON:");
+    // println!("{}", req_json);  // ⬅️ YORUM SATIRI YAP
 
+    let req_json = serde_json::to_string_pretty(&request)?;
     fs::write(REGISTER_REQ_PATH, req_json)?;
     
     println!("✅ Request sent to server!");
@@ -262,8 +263,8 @@ fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::err
     
     let probe_bits = extract_fingerprint_128bit(image_path)?;
     
-    if probe_bits.len() != 128 {
-        return Err(format!("Expected 128 bits, got {}", probe_bits.len()).into());
+    if probe_bits.len() != 256 {
+        return Err(format!("Expected 256 bits, got {}", probe_bits.len()).into());
     }
     
     println!("✅ Extracted {} bits", probe_bits.len());
@@ -376,9 +377,9 @@ fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::err
         .map(|b| b.decrypt(&client_key))
         .collect();
     
-    // Convert 8-bit binary to decimal
+    // Convert 9-bit binary to decimal
     let distance = bits_to_usize(&distance_bits);
-    let similarity = 1.0 - (distance as f32 / 128.0);
+    let similarity = 1.0 - (distance as f32 / 256.0);
     
     // 9. Display Results
     println!("\n{}", "═".repeat(70));
@@ -390,7 +391,7 @@ fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::err
     println!("{}", "═".repeat(70));
     println!("User ID:          {}", user_id);
     println!("Match Result:     {}", match_result);
-    println!("Hamming Distance: {}/128 bits", distance);
+    println!("Hamming Distance: {}/256 bits", distance);
     println!("Similarity:       {:.2}%", similarity * 100.0);
     println!("Threshold:        70%");
     println!("Timestamp:        {}", response.timestamp);
@@ -400,7 +401,7 @@ fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::err
         println!("\n🚨 DEBUG INFO (Server-side):");
         println!("   Server Match:    {}", debug_match);
         if let Some(debug_dist) = response.debug_server_distance {
-            println!("   Server Distance: {}/128", debug_dist);
+            println!("   Server Distance: {}/256", debug_dist);
         }
     }
     

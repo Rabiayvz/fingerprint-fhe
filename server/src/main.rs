@@ -5,7 +5,7 @@ use shared::{
     RegisterRequest, RegisterResponse,
     VerifyRequest, VerifyResponse,
     decrypt_homomorphic,
-    diff_bits, popcount_128, leq_constant,
+    diff_bits, popcount_256, leq_constant,  // ⬅️ popcount_128 → popcount_256
 };
 
 use tfhe::{set_server_key, ServerKey, FheBool};
@@ -249,11 +249,11 @@ fn handle_verify() -> Result<(), Box<dyn std::error::Error>> {
     println!("   ✅ Difference bits computed");
     
     // 7b. Popcount (Hamming distance)
-    let distance_fhe = popcount_128(&diff, &encrypted_true);
-    println!("   ✅ Hamming distance computed (8-bit encrypted counter)");
+    let distance_fhe = popcount_256(&diff, &encrypted_true);
+    println!("   ✅ Hamming distance computed (9-bit encrypted counter)");
     
-    // 7c. Threshold comparison (70% similarity = max 38 bits difference)
-    let threshold = (128.0 * 0.3) as usize; // 30% difference = 70% similarity
+    // 7c. Threshold comparison (70% similarity = max 77 bits difference)
+    let threshold = (256.0 * 0.3) as usize;
     let match_result_fhe = leq_constant(&distance_fhe, threshold, &encrypted_true);
     println!("   ✅ Threshold comparison done (threshold: {} bits)", threshold);
     
