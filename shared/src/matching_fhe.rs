@@ -39,6 +39,26 @@ pub fn popcount_512(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
     acc
 }
 
+/// Popcount for 1024 bits, 11 bits are enough (0..1024).
+pub fn popcount_1024(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
+    assert_eq!(diff.len(), 1024, "Expected 1024 bits for popcount_1024");
+
+    let fhe_false = fhe_true ^ fhe_true;
+    let mut acc = vec![fhe_false.clone(); 11]; // 11-bit counter (0-1024 range)
+
+    for bit in diff.iter() {
+        let mut carry = bit.clone();
+        for i in 0..acc.len() {
+            let sum = &acc[i] ^ &carry;
+            let new_carry = &acc[i] & &carry;
+            acc[i] = sum;
+            carry = new_carry;
+        }
+    }
+
+    acc
+}
+
 /// Backward compatibility: popcount_256 redirects to popcount_512 with padding
 pub fn popcount_256(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
     if diff.len() == 256 {

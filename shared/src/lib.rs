@@ -8,10 +8,11 @@ pub use trivium::{Trivium, u64_to_bits_80};
 pub use trivium_fhe::decrypt_homomorphic;
 pub use matching_fhe::{
     diff_bits,
-    popcount_256,
     popcount_128,
+    popcount_256,
     popcount_512,
-    leq_constant
+    popcount_1024,
+    leq_constant,
 };
 pub use protocol::{
     RegisterRequest, RegisterResponse,

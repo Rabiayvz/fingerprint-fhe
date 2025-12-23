@@ -1,38 +1,32 @@
 use image::{GrayImage, ImageError, imageops};
 
-/// 512-bit feature extraction using grid-based statistics
-/// 8×8 grid = 64 regions, 8 bits per region = 512 bits total
+/// 1024-bit feature extraction using Local Binary Patterns
+/// 32×32 grid with LBP texture features
 pub fn extract_fingerprint_128bit(image_path: &str) -> Result<Vec<bool>, ImageError> {
-    // 1. Read and preprocess
+    // 1. Read and resize to 64×64
     let img = image::open(image_path)?.to_luma8();
+    let resized = imageops::resize(&img, 64, 64, imageops::FilterType::Lanczos3);
     
-    // 2. Resize to 64×64 for better detail preservation
-    let resized = imageops::resize(
-        &img,
-        64,
-        64,
-        imageops::FilterType::Lanczos3
-    );
-    
-    // 3. Normalize image
+    // 2. Normalize
     let normalized = normalize_image(&resized);
     
-    // 4. Extract grid-based features
-    let bits = extract_grid_features(&normalized, 8, 8);
+    // 3. Calculate LBP
+    let lbp_image = calculate_lbp(&normalized);
     
-    assert_eq!(bits.len(), 512, "Expected 512 bits");
+    // 4. Extract regional histograms (16×16 regions, each with 64-bin histogram)
+    let bits = extract_lbp_features(&lbp_image, 8, 8); // 8×8 = 64 regions
     
-    println!("✅ Extracted 512 bits (8×8 grid with regional statistics)");
+    assert_eq!(bits.len(), 1024, "Expected 1024 bits");
+    
+    println!("✅ Extracted 1024 bits (LBP texture features)");
     
     Ok(bits)
 }
 
-/// Normalize image to have mean=128, std=50
 fn normalize_image(img: &GrayImage) -> GrayImage {
     let (width, height) = img.dimensions();
     let mut normalized = GrayImage::new(width, height);
     
-    // Calculate mean and std
     let mut sum = 0.0;
     let mut sum_sq = 0.0;
     let total = (width * height) as f32;
@@ -45,9 +39,8 @@ fn normalize_image(img: &GrayImage) -> GrayImage {
     
     let mean = sum / total;
     let variance = (sum_sq / total) - (mean * mean);
-    let std = variance.sqrt().max(1.0); // Avoid division by zero
+    let std = variance.sqrt().max(1.0);
     
-    // Normalize: (x - mean) / std * 50 + 128
     for (x, y, pixel) in img.enumerate_pixels() {
         let val = pixel[0] as f32;
         let normalized_val = ((val - mean) / std * 50.0 + 128.0).clamp(0.0, 255.0) as u8;
@@ -57,145 +50,124 @@ fn normalize_image(img: &GrayImage) -> GrayImage {
     normalized
 }
 
-/// Extract 512-bit features from 8×8 grid
-fn extract_grid_features(img: &GrayImage, grid_x: usize, grid_y: usize) -> Vec<bool> {
+/// Calculate Local Binary Pattern for entire image
+fn calculate_lbp(img: &GrayImage) -> Vec<u8> {
     let (width, height) = img.dimensions();
-    let region_w = width as usize / grid_x;
-    let region_h = height as usize / grid_y;
+    let mut lbp = vec![0u8; (width * height) as usize];
     
-    let mut bits = Vec::with_capacity(grid_x * grid_y * 8);
+    // Process each pixel (excluding borders)
+    for y in 1..(height - 1) {
+        for x in 1..(width - 1) {
+            let center = img.get_pixel(x, y)[0];
+            let mut code = 0u8;
+            
+            // 8 neighbors in clockwise order
+            let neighbors = [
+                img.get_pixel(x - 1, y - 1)[0], // Top-left
+                img.get_pixel(x, y - 1)[0],     // Top
+                img.get_pixel(x + 1, y - 1)[0], // Top-right
+                img.get_pixel(x + 1, y)[0],     // Right
+                img.get_pixel(x + 1, y + 1)[0], // Bottom-right
+                img.get_pixel(x, y + 1)[0],     // Bottom
+                img.get_pixel(x - 1, y + 1)[0], // Bottom-left
+                img.get_pixel(x - 1, y)[0],     // Left
+            ];
+            
+            // Build 8-bit LBP code
+            for (i, &neighbor) in neighbors.iter().enumerate() {
+                if neighbor >= center {
+                    code |= 1 << i;
+                }
+            }
+            
+            lbp[(y * width + x) as usize] = code;
+        }
+    }
     
+    lbp
+}
+
+/// Extract features from LBP image using regional histograms
+fn extract_lbp_features(lbp: &[u8], grid_x: usize, grid_y: usize) -> Vec<bool> {
+    let width = 64;
+    let height = 64;
+    let region_w = width / grid_x;
+    let region_h = height / grid_y;
+    
+    let mut bits = Vec::new();
+    
+    // For each region
     for gy in 0..grid_y {
         for gx in 0..grid_x {
             let start_x = gx * region_w;
             let start_y = gy * region_h;
-            let end_x = start_x + region_w;
-            let end_y = start_y + region_h;
+            let end_x = (start_x + region_w).min(width);
+            let end_y = (start_y + region_h).min(height);
             
-            // Extract region
-            let mut region_pixels = Vec::new();
+            // Build histogram of LBP codes (256 bins)
+            let mut histogram = [0u32; 256];
+            
             for y in start_y..end_y {
                 for x in start_x..end_x {
-                    region_pixels.push(img.get_pixel(x as u32, y as u32)[0]);
+                    let lbp_code = lbp[y * width + x];
+                    histogram[lbp_code as usize] += 1;
                 }
             }
             
-            // Calculate statistics
-            let mean = calculate_mean(&region_pixels);
-            let std = calculate_std(&region_pixels, mean);
-            let edge_density = calculate_edge_density(img, start_x, start_y, end_x, end_y);
-            let gradient_dir = calculate_gradient_direction(img, start_x, start_y, end_x, end_y);
+            // Use only uniform patterns (reduce 256 → 59 patterns)
+            let uniform_bins = get_uniform_patterns();
+            let mut uniform_histogram = vec![0u32; uniform_bins.len()];
             
-            // Convert to bits (2 bits each = 8 bits per region)
-            bits.extend(quantize_to_2bits(mean));
-            bits.extend(quantize_to_2bits(std));
-            bits.extend(quantize_to_2bits(edge_density));
-            bits.extend(quantize_to_2bits(gradient_dir));
+            for (code, &count) in histogram.iter().enumerate() {
+                if let Some(idx) = uniform_bins.iter().position(|&x| x == code as u8) {
+                    uniform_histogram[idx] = count;
+                }
+            }
+            
+            // Convert histogram to 16 bits (quantize to most significant patterns)
+            let top_patterns = get_top_k_indices(&uniform_histogram, 16);
+            for i in 0..16 {
+                bits.push(top_patterns.contains(&i));
+            }
         }
     }
     
     bits
 }
 
-fn calculate_mean(pixels: &[u8]) -> f32 {
-    let sum: u32 = pixels.iter().map(|&p| p as u32).sum();
-    sum as f32 / pixels.len() as f32
-}
-
-fn calculate_std(pixels: &[u8], mean: f32) -> f32 {
-    let variance: f32 = pixels
-        .iter()
-        .map(|&p| {
-            let diff = p as f32 - mean;
-            diff * diff
-        })
-        .sum::<f32>() / pixels.len() as f32;
+/// Get uniform LBP patterns (patterns with at most 2 transitions)
+fn get_uniform_patterns() -> Vec<u8> {
+    let mut patterns = Vec::new();
     
-    variance.sqrt()
-}
-
-fn calculate_edge_density(
-    img: &GrayImage,
-    start_x: usize,
-    start_y: usize,
-    end_x: usize,
-    end_y: usize,
-) -> f32 {
-    let mut edge_count = 0;
-    let mut total_count = 0;
-    
-    // Simple edge detection using gradient
-    for y in start_y..(end_y - 1) {
-        for x in start_x..(end_x - 1) {
-            let curr = img.get_pixel(x as u32, y as u32)[0] as i32;
-            let right = img.get_pixel((x + 1) as u32, y as u32)[0] as i32;
-            let down = img.get_pixel(x as u32, (y + 1) as u32)[0] as i32;
-            
-            let gx = (right - curr).abs();
-            let gy = (down - curr).abs();
-            let gradient = (gx + gy) as f32;
-            
-            if gradient > 30.0 {  // Threshold for edge
-                edge_count += 1;
-            }
-            total_count += 1;
+    for code in 0u8..=255 {
+        let transitions = count_transitions(code);
+        if transitions <= 2 {
+            patterns.push(code);
         }
     }
     
-    if total_count > 0 {
-        edge_count as f32 / total_count as f32 * 255.0
-    } else {
-        0.0
-    }
+    patterns
 }
 
-fn calculate_gradient_direction(
-    img: &GrayImage,
-    start_x: usize,
-    start_y: usize,
-    end_x: usize,
-    end_y: usize,
-) -> f32 {
-    let mut sum_gx = 0.0;
-    let mut sum_gy = 0.0;
+/// Count bit transitions in circular 8-bit code
+fn count_transitions(code: u8) -> u32 {
+    let mut transitions = 0;
+    let mut prev_bit = (code >> 7) & 1;
     
-    for y in start_y..(end_y - 1) {
-        for x in start_x..(end_x - 1) {
-            let curr = img.get_pixel(x as u32, y as u32)[0] as f32;
-            let right = img.get_pixel((x + 1) as u32, y as u32)[0] as f32;
-            let down = img.get_pixel(x as u32, (y + 1) as u32)[0] as f32;
-            
-            sum_gx += right - curr;
-            sum_gy += down - curr;
+    for i in 0..8 {
+        let curr_bit = (code >> i) & 1;
+        if curr_bit != prev_bit {
+            transitions += 1;
         }
+        prev_bit = curr_bit;
     }
     
-    // Return angle in 0-255 range
-    let angle = sum_gy.atan2(sum_gx);
-    ((angle + std::f32::consts::PI) / (2.0 * std::f32::consts::PI) * 255.0) as f32
+    transitions
 }
 
-/// Quantize float value (0-255) to 2 bits
-fn quantize_to_2bits(value: f32) -> Vec<bool> {
-    let quantized = ((value / 255.0) * 3.0) as u8; // 0, 1, 2, or 3
-    vec![
-        (quantized & 0b01) != 0,
-        (quantized & 0b10) != 0,
-    ]
-}
-
-// Debug helper
-#[allow(dead_code)]
-pub fn print_binary_grid(bits: &[bool]) {
-    println!("  Binary feature vector (512 bits):");
-    for chunk in 0..(512 / 64) {
-        print!("  ");
-        for i in 0..64 {
-            let idx = chunk * 64 + i;
-            if idx < bits.len() {
-                print!("{}", if bits[idx] { "1" } else { "0" });
-            }
-        }
-        println!();
-    }
+/// Get indices of top K values in array
+fn get_top_k_indices(arr: &[u32], k: usize) -> Vec<usize> {
+    let mut indexed: Vec<(usize, u32)> = arr.iter().enumerate().map(|(i, &v)| (i, v)).collect();
+    indexed.sort_by(|a, b| b.1.cmp(&a.1));
+    indexed.iter().take(k).map(|&(i, _)| i).collect()
 }
