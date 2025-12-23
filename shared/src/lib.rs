@@ -8,8 +8,9 @@ pub use trivium::{Trivium, u64_to_bits_80};
 pub use trivium_fhe::decrypt_homomorphic;
 pub use matching_fhe::{
     diff_bits,
-    popcount_256,      // ⬅️ YENİ (primary)
-    popcount_128,      // ⬅️ ESKİ (backward compatibility)
+    popcount_256,
+    popcount_128,
+    popcount_512,
     leq_constant
 };
 pub use protocol::{

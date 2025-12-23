@@ -19,16 +19,14 @@ pub fn diff_bits(a: &[FheBool], b: &[FheBool]) -> Vec<FheBool> {
     a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
 }
 
-/// Popcount for diff bits into an encrypted binary counter (LSB-first).
-/// For 256 bits, 9 bits are enough (0..256).
-pub fn popcount_256(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
-    assert_eq!(diff.len(), 256, "Expected 256 bits for popcount_256");
+/// Popcount for 512 bits, 10 bits are enough (0..512).
+pub fn popcount_512(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
+    assert_eq!(diff.len(), 512, "Expected 512 bits for popcount_512");
 
     let fhe_false = fhe_true ^ fhe_true;
-    let mut acc = vec![fhe_false.clone(); 9]; // 9-bit counter (0-256 range)
+    let mut acc = vec![fhe_false.clone(); 10]; // 10-bit counter (0-512 range)
 
     for bit in diff.iter() {
-        // Add 1-bit value `bit` into binary accumulator (ripple-carry adder)
         let mut carry = bit.clone();
         for i in 0..acc.len() {
             let sum = &acc[i] ^ &carry;
@@ -36,22 +34,31 @@ pub fn popcount_256(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
             acc[i] = sum;
             carry = new_carry;
         }
-        // overflow ignored (max 256 fits in 9 bits)
     }
 
     acc
 }
 
-/// Backward compatibility: popcount_128 redirects to popcount_256 with padding
-pub fn popcount_128(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
-    if diff.len() == 128 {
-        // Pad to 256 bits with zeros (false)
+/// Backward compatibility: popcount_256 redirects to popcount_512 with padding
+pub fn popcount_256(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
+    if diff.len() == 256 {
         let fhe_false = fhe_true ^ fhe_true;
         let mut padded = diff.to_vec();
-        padded.extend(vec![fhe_false.clone(); 128]);
-        return popcount_256(&padded, fhe_true);
+        padded.extend(vec![fhe_false.clone(); 256]);
+        return popcount_512(&padded, fhe_true);
     }
-    popcount_256(diff, fhe_true)
+    popcount_512(diff, fhe_true)
+}
+
+/// Backward compatibility: popcount_128 redirects to popcount_512 with padding
+pub fn popcount_128(diff: &[FheBool], fhe_true: &FheBool) -> Vec<FheBool> {
+    if diff.len() == 128 {
+        let fhe_false = fhe_true ^ fhe_true;
+        let mut padded = diff.to_vec();
+        padded.extend(vec![fhe_false.clone(); 384]);
+        return popcount_512(&padded, fhe_true);
+    }
+    popcount_512(diff, fhe_true)
 }
 
 /// Compute (distance <= threshold) where distance is encrypted bits (LSB-first),
