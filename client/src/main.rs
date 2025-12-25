@@ -93,8 +93,8 @@ fn handle_register(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::e
     
     let fingerprint_bits = extract_fingerprint_128bit(image_path)?;
     
-    if fingerprint_bits.len() != 1024 {  // ⬅️
-        return Err(format!("Expected 1024 bits, got {}", fingerprint_bits.len()).into());
+    if fingerprint_bits.len() != 512 {
+        return Err(format!("Expected 512 bits, got {}", fingerprint_bits.len()).into());
     }
     
     println!("✅ Extracted {} bits", fingerprint_bits.len());
@@ -263,8 +263,8 @@ fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::err
     
     let probe_bits = extract_fingerprint_128bit(image_path)?;
     
-    if probe_bits.len() != 1024 {  // ⬅️
-        return Err(format!("Expected 1024 bits, got {}", probe_bits.len()).into());
+    if probe_bits.len() != 512 {
+        return Err(format!("Expected 512 bits, got {}", probe_bits.len()).into());
     }
     
     println!("✅ Extracted {} bits", probe_bits.len());
@@ -379,7 +379,7 @@ fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::err
     
     // Convert 9-bit binary to decimal
     let distance = bits_to_usize(&distance_bits);
-    let similarity = 1.0 - (distance as f32 / 1024.0);  // ⬅️
+    let similarity = 1.0 - (distance as f32 / 512.0);
     
     // 9. Display Results
     println!("\n{}", "═".repeat(70));
@@ -391,9 +391,9 @@ fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::err
     println!("{}", "═".repeat(70));
     println!("User ID:          {}", user_id);
     println!("Match Result:     {}", match_result);
-    println!("Hamming Distance: {}/1024 bits", distance);  // ⬅️
+    println!("Hamming Distance: {}/512 bits", distance);
     println!("Similarity:       {:.2}%", similarity * 100.0);
-    println!("Threshold:        80%");  // ⬅️
+    println!("Threshold:        80%");
     println!("Timestamp:        {}", response.timestamp);
     
     // Debug info (if available)
@@ -401,7 +401,7 @@ fn handle_verify(user_id: &str, image_path: &str) -> Result<(), Box<dyn std::err
         println!("\n🚨 DEBUG INFO (Server-side):");
         println!("   Server Match:    {}", debug_match);
         if let Some(debug_dist) = response.debug_server_distance {
-            println!("   Server Distance: {}/1024", debug_dist);  // ⬅️
+            println!("   Server Distance: {}/512", debug_dist);
         }
     }
     
