@@ -1,3 +1,4 @@
 /target
 database/*.bin
 database/server_key.bin
+databse/templates.json

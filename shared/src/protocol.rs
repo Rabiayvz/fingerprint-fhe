@@ -8,6 +8,7 @@ pub struct RegisterRequest {
     pub ciphertext: Vec<bool>,              // 128 bits - Trivium encrypted
     pub encrypted_key_bytes: Vec<u8>,       // FHE encrypted Trivium key (80 bits)
     pub encrypted_iv_bytes: Vec<u8>,        // FHE encrypted Trivium IV (80 bits)
+    pub encrypted_true_bytes: Vec<u8>,      // FHE encrypted true constant
     pub server_key_bytes: Option<Vec<u8>>,  // İlk kayıtta gönderilir
 }
 
@@ -25,6 +26,7 @@ impl RegisterRequest {
         ciphertext: Vec<bool>,
         encrypted_key_bytes: Vec<u8>,
         encrypted_iv_bytes: Vec<u8>,
+        encrypted_true_bytes: Vec<u8>,
         server_key_bytes: Option<Vec<u8>>,
     ) -> Self {
         Self {
@@ -32,6 +34,7 @@ impl RegisterRequest {
             ciphertext,
             encrypted_key_bytes,
             encrypted_iv_bytes,
+            encrypted_true_bytes,
             server_key_bytes,
         }
     }

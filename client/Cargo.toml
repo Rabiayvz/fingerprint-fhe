@@ -1,7 +1,18 @@
+[workspace]
+members = ["client", "server", "tests"]
+
 [package]
 name = "client"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "client"
+path = "src/main.rs"
+
+[[bin]]
+name = "quick_performance_test"
+path = "tests/quick_performance_test.rs"
 
 [dependencies]
 shared = { path = "../shared" }
@@ -11,9 +22,3 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 bincode = { workspace = true }
 rand = "0.8"
-
-[[bin]]
-name = "client"
-path = "src/main.rs"
-
-# Network (şimdilik file-based, sonra TCP)
