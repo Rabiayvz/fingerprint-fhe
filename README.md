@@ -1,226 +1,222 @@
 # fingerprint-fhe
 
-Sunucunun ham (plaintext) parmak izi verisini **hiçbir zaman** görmediği bir
-parmak izi doğrulama prototipi. Gizlilik, **Tam Homomorfik Şifreleme (FHE)**
-ve hafif bir akış şifresi olan **Trivium** üzerine kurulu bir
-*transciphering* şemasıyla sağlanıyor.
+A fingerprint verification prototype where the server **never** sees raw
+(plaintext) fingerprint data. Privacy is achieved through a *transciphering*
+scheme built on **Fully Homomorphic Encryption (FHE)** and **Trivium**, a
+lightweight stream cipher.
 
-> Araştırma/prototip amaçlı bir projedir; "Bilinen sınırlamalar" bölümünde
-> dürüstçe belirtildiği gibi biyometrik tanıma doğruluğu henüz üretim
-> seviyesinde değildir. Projenin asıl katkısı, FHE + transciphering ile
-> çalışan uçtan uca sistem tasarımı ve performans değerlendirmesidir.
+> This is a research/prototype project. As honestly stated in "Known
+> Limitations" below, biometric recognition accuracy is not yet
+> production-grade. The project's main contribution is the end-to-end
+> system design and performance evaluation of the FHE + transciphering
+> pipeline, not recognition accuracy.
 
-## Genel Bakış
+## Overview
 
-Fikir şu: istemci parmak izinden çıkardığı 512-bit öznitelik vektörünü,
-hafif bir akış şifresi olan **Trivium** ile şifreler (bu adım FHE kullanmaz,
-çok hızlıdır). Bu şifreli veri, Trivium anahtarı/IV'si ile birlikte FHE
-altında sunucuya gönderilir. Sunucu, FHE üzerinde çalışan bir Trivium devresi
-(`TriviumFhe`) kullanarak bu veriyi **şifreli biçimde çözer** — sonuç her
-zaman `FheBool` olarak kalır, sunucu düz metni hiçbir noktada görmez.
-Eşleştirme (Hamming mesafesi hesaplama + eşik karşılaştırması) de tamamen
-FHE devreleriyle, şifreli veri üzerinde yapılır.
+The idea: the client extracts a 512-bit feature vector from the fingerprint
+and encrypts it with **Trivium**, a lightweight stream cipher (this step
+does not use FHE and is very fast). This ciphertext, together with the
+Trivium key/IV, is sent to the server encrypted under FHE. The server runs
+an FHE circuit of Trivium (`TriviumFhe`) to **homomorphically decrypt** this
+data — the result always stays an `FheBool`, the server never sees any
+plaintext at any point. Matching (Hamming distance + threshold comparison)
+is also done entirely with FHE circuits, over encrypted data.
 
-Bu yaklaşımın amacı, tüm veriyi doğrudan FHE ile şifrelemenin (çok daha
-pahalı) maliyetinden kaçınmak: pahalı FHE işlemleri yalnızca Trivium'un
-sınırlı devresiyle ve eşleştirme mantığıyla sınırlı tutuluyor.
+The goal of this approach is to avoid the (much higher) cost of encrypting
+all the data directly under FHE: expensive FHE operations are limited to
+Trivium's bounded circuit and the matching logic.
 
-## Mimari ve Protokol
+## Architecture and Protocol
 
 ```
-client/   → Parmak izi okuma, 512-bit öznitelik çıkarma, Trivium + FHE anahtar şifreleme, TCP istemcisi
-server/   → TCP sunucusu, decrypt_homomorphic + FHE eşleştirme, templates.json veritabanı yönetimi
-shared/   → Ortak protokol (Request/Response), Trivium, TriviumFhe, FHE eşleştirme devreleri, TCP framing (net.rs)
+client/   → Fingerprint reading, 512-bit feature extraction, Trivium + FHE key encryption, TCP client
+server/   → TCP server, decrypt_homomorphic + FHE matching, templates.json database management
+shared/   → Shared protocol (Request/Response), Trivium, TriviumFhe, FHE matching circuits, TCP framing (net.rs)
 ```
 
-İstemci ve sunucu, uzunluk ön ekli (length-prefixed) JSON mesajlarla TCP
-üzerinden konuşur (`shared::net`). Tehdit modeli **honest-but-curious**:
-sunucu yalnızca FHE *evaluation key*'ine (`server_key`) sahiptir, istemcinin
-*secret key*'ini (`client_key`) hiçbir zaman görmez — protokolden ne kadar
-saparsa sapsın, elindeki hiçbir ciphertext'i çözemeyecek şekilde
-yapısal olarak kısıtlıdır.
+The client and server talk over TCP using length-prefixed JSON messages
+(`shared::net`). The threat model is **honest-but-curious**: the server only
+ever holds the FHE *evaluation key* (`server_key`), never the client's
+*secret key* (`client_key`) — no matter how it deviates from the protocol,
+it is structurally unable to decrypt any ciphertext it holds.
 
-> **Not:** `client_key`, makine başına tek ve küresel bir anahtardır (her
-> kullanıcıya özel değil) — `~/.fingerprint_client/client_key.bin`
-> (Windows'ta `%APPDATA%\fingerprint_client\`). Bu, "her cihaz kendi
-> anahtarı" modeli değil, denetimli bir kiosk/iş istasyonunun birden fazla
-> kullanıcı kaydettiği senaryoyu modelleyen **bilinçli bir tasarım
-> kararıdır**: bu dosyanın ele geçmesi, o istasyondan kaydedilmiş tüm
-> şablonları ifşa eder.
+> **Note:** `client_key` is a single, global key per machine (not per
+> user) — stored at `~/.fingerprint_client/client_key.bin`
+> (`%APPDATA%\fingerprint_client\` on Windows). This is **not** a "one
+> device, one key" model; it's a **deliberate design decision** modeling a
+> supervised kiosk/workstation that enrolls multiple users: compromising
+> this one file exposes every template registered from that station.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as İstemci (Client)
-    participant S as Sunucu (Server)
+    participant C as Client
+    participant S as Server
     participant DB as templates.json
 
     Note over C,S: REGISTER
     rect rgb(207, 227, 212)
     Note right of C: PLAINTEXT
-    C->>C: 512-bit öznitelik çıkar (parmak izi görüntüsünden)
-    C->>C: rastgele Trivium key (80b) + IV (80b) üret
+    C->>C: extract 512-bit feature vector (from fingerprint image)
+    C->>C: generate random Trivium key (80b) + IV (80b)
     end
     rect rgb(244, 223, 176)
-    Note right of C: TRIVIUM-CIPHERTEXT (açıkta gider, anahtarsız kırılamaz)
-    C->>C: Trivium.process(öznitelik) → ciphertext (512b)
+    Note right of C: TRIVIUM-CIPHERTEXT (sent in the clear, unbreakable without the key)
+    C->>C: Trivium.process(feature vector) → ciphertext (512b)
     end
     rect rgb(217, 217, 240)
     Note right of C: FHE-CIPHERTEXT
-    C->>C: (ilk kayıtsa) FHE anahtar çifti üret (client_key, server_key)
-    C->>C: key / iv / "true" sabitini client_key ile şifrele
+    C->>C: (first registration) generate FHE key pair (client_key, server_key)
+    C->>C: encrypt key / iv / "true" constant with client_key
     C->>S: TCP Request::Register { trivium_ct, enc_key, enc_iv, enc_true, server_key? }
-    S->>S: (ilk kayıtsa) server_key'i sakla
-    S->>S: decrypt_homomorphic(trivium_ct, enc_key, enc_iv) → FHE-şifreli 512-bit şablon
+    S->>S: (first registration) store server_key
+    S->>S: decrypt_homomorphic(trivium_ct, enc_key, enc_iv) → FHE-encrypted 512-bit template
     end
-    S->>DB: FHE-şifreli şablonu yaz
+    S->>DB: write FHE-encrypted template
     S-->>C: TCP Response::Register { success }
 
     Note over C,S: VERIFY
     rect rgb(207, 227, 212)
     Note right of C: PLAINTEXT
-    C->>C: probe görüntüden 512-bit öznitelik çıkar
-    C->>C: YENİ rastgele Trivium key/IV üret
+    C->>C: extract 512-bit feature vector from probe image
+    C->>C: generate NEW random Trivium key/IV
     end
     rect rgb(244, 223, 176)
     Note right of C: TRIVIUM-CIPHERTEXT
-    C->>C: Trivium.process(probe öznitelik) → ciphertext
+    C->>C: Trivium.process(probe feature vector) → ciphertext
     end
     rect rgb(217, 217, 240)
     Note right of C: FHE-CIPHERTEXT
-    C->>C: key / iv / "true" sabitini şifrele
+    C->>C: encrypt key / iv / "true" constant
     C->>S: TCP Request::Verify { trivium_ct, enc_key, enc_iv, enc_true }
-    S->>DB: kayıtlı FHE-şifreli şablonu al
-    S->>S: decrypt_homomorphic(...) → FHE-şifreli probe şablon
-    S->>S: diff_bits → popcount_512 → leq_constant (hepsi FHE altında)
+    S->>DB: fetch stored FHE-encrypted template
+    S->>S: decrypt_homomorphic(...) → FHE-encrypted probe template
+    S->>S: diff_bits → popcount_512 → leq_constant (all under FHE)
     S-->>C: TCP Response::Verify { enc_match, enc_distance }
     end
     rect rgb(207, 227, 212)
-    Note right of C: PLAINTEXT (yalnızca istemci çözebilir)
-    C->>C: client_key ile match + mesafeyi çöz, sonucu göster
+    Note right of C: PLAINTEXT (only the client can decrypt this)
+    C->>C: decrypt match + distance with client_key, display result
     end
 ```
 
-## Gereksinimler
+## Requirements
 
 - Rust (2021 edition, `cargo`)
-- Linux/macOS/Windows, **x86_64** (FHE kütüphanesi `tfhe` bu mimari için derleniyor)
+- Linux/macOS/Windows, **x86_64** (the `tfhe` FHE library is compiled for this architecture)
 
-## Kurulum ve Çalıştırma
+## Build and Run
 
 ```bash
 git clone git@github.com:Rabiayvz/fingerprint-fhe.git
 cd fingerprint-fhe
 
-# Sunucuyu başlat (ayrı bir terminalde, sürekli çalışır)
+# Start the server (in its own terminal, runs continuously)
 cd server && cargo run --release
 ```
 
-Beklenen çıktı:
+Expected output:
 
 ```
 2026-08-10T12:00:00.000000Z  INFO server: listening addr=127.0.0.1:7878
 ```
 
-Başka bir terminalde istemciyi çalıştırın:
+Run the client in another terminal:
 
 ```bash
 cd client
 
-# Yeni kullanıcı kaydet
+# Register a new user
 cargo run --release --bin client -- register user_101 ../data/fingerprints/101_1.tif
 
-# Aynı kullanıcıyı başka bir örnekle doğrula
+# Verify the same user with a different sample
 cargo run --release --bin client -- verify user_101 ../data/fingerprints/101_2.tif
 ```
 
-İlerleme loglarını görmek için `RUST_LOG=info` (veya `debug`) ortam
-değişkenini ayarlayın:
+Set `RUST_LOG=info` (or `debug`) to see progress logs:
 
 ```bash
 RUST_LOG=info cargo run --release --bin client -- register user_101 ../data/fingerprints/101_1.tif
 ```
 
-> **Not:** `client` paketi altında birden fazla binary var (`client`,
+> **Note:** the `client` package has multiple binaries (`client`,
 > `bench_fhe`, `eval_accuracy`, `test_trivium_equivalence`,
-> `stress_test_trivium_reduced_warmup`) — `--bin client` belirtmeden
-> `cargo run` çalıştırmak hata verir.
+> `stress_test_trivium_reduced_warmup`) — running `cargo run` without
+> `--bin client` will fail.
 
-### Zamanlama beklentisi
+### Timing Expectations
 
-İlk `register` çağrısında FHE anahtar çifti üretimi ~1 saniye sürer.
-`decrypt_homomorphic` (sunucu tarafı transciphering) tek başına birkaç
-dakika sürüyor — bu, `register` sırasında bir kez, `verify` sırasında da
-probe için bir kez çalışıyor. İstemci kodundaki uzun zaman aşımları bu
-maliyeti hesaba katıyor.
+FHE key-pair generation on the first `register` call takes ~1 second.
+`decrypt_homomorphic` (server-side transciphering) alone takes several
+minutes — this runs once during `register` and once for the probe during
+`verify`. The client's long timeouts account for this cost.
 
-## Değerlendirme ve Benchmark Script'leri
+## Evaluation and Benchmark Scripts
 
 ```bash
 cd client
 
-# Plaintext doğruluk değerlendirmesi (FAR/FRR/EER, data/fingerprints/ üzerinde, saniyeler sürer)
+# Plaintext accuracy evaluation (FAR/FRR/EER, over data/fingerprints/, finishes in seconds)
 cargo run --release --bin eval_accuracy
 
-# Uçtan uca performans ölçümü (transciphering vs. saf-FHE baseline)
+# End-to-end performance measurement (transciphering vs. a pure-FHE baseline)
 cargo run --release --bin bench_fhe
 
-# TriviumFhe ↔ plaintext Trivium eşdeğerlik testi (N tam-devre denemesi)
+# TriviumFhe vs. plaintext Trivium equivalence test (N full-circuit trials)
 cargo run --release --bin test_trivium_equivalence
 
-# TriviumFhe'nin kapı mantığını indirgenmiş ısınma turuyla stres testi (araştırma amaçlı, spesifikasyon dışı)
+# Stress-tests TriviumFhe's gate logic with a reduced warm-up round count (research-only, non-spec)
 cargo run --release --bin stress_test_trivium_reduced_warmup
 ```
 
-`eval_accuracy` çıkışı (FVC2002 DB1_B altkümesi, 10 parmak × 8 örnek = 80
-görüntü üzerinde ölçülmüştür):
+`eval_accuracy` output (measured on the FVC2002 DB1_B subset, 10 fingers ×
+8 samples = 80 images):
 
-| Metrik | Değer |
+| Metric | Value |
 |---|---|
-| Genuine çift sayısı | 280 |
-| Impostor çift sayısı | 2880 |
-| Yaklaşık EER | ~%46 |
-| Sunucu eşiği | Hamming mesafe ≤ 194/512 bit (≈ %62 benzerlik) |
+| Genuine pairs | 280 |
+| Impostor pairs | 2880 |
+| Approximate EER | ~46% |
+| Server threshold | Hamming distance ≤ 194/512 bits (≈ 62% similarity) |
 
-## Proje Yapısı
+## Project Structure
 
 ```
 fingerprint-fhe/
 ├── client/
-│   ├── src/main.rs          → CLI (register / verify), TCP istemcisi, FHE anahtar yönetimi
-│   ├── src/feature_extraction.rs → 512-bit öznitelik çıkarımı (blok bazlı ridge orientation)
-│   ├── src/matching.rs      → Plaintext Hamming mesafesi yardımcıları
+│   ├── src/main.rs          → CLI (register / verify), TCP client, FHE key management
+│   ├── src/feature_extraction.rs → 512-bit feature extraction (block-wise ridge orientation)
+│   ├── src/matching.rs      → Plaintext Hamming distance helpers
 │   └── src/bin/             → bench_fhe, eval_accuracy, test_trivium_equivalence, stress_test_*
-├── server/src/main.rs       → TCP sunucusu, FHE eşleştirme, veritabanı yönetimi
+├── server/src/main.rs       → TCP server, FHE matching, database management
 ├── shared/src/
-│   ├── protocol.rs          → Request/Response mesaj tipleri
-│   ├── net.rs               → Uzunluk ön ekli JSON framing (TCP üzerinden)
-│   ├── trivium.rs / trivium_fhe.rs → Plaintext ve FHE-devresi Trivium
-│   └── matching_fhe.rs      → popcount, Hamming mesafesi, eşik karşılaştırması (hepsi FHE altında)
-├── data/fingerprints/       → FVC2002 DB1 (subset B) örnek parmak izi görüntüleri
-└── database/                → server_key.bin, templates.json (ikisi de .gitignore'da — yerel üretilir)
+│   ├── protocol.rs          → Request/Response message types
+│   ├── net.rs               → Length-prefixed JSON framing (over TCP)
+│   ├── trivium.rs / trivium_fhe.rs → Plaintext and FHE-circuit Trivium
+│   └── matching_fhe.rs      → popcount, Hamming distance, threshold comparison (all under FHE)
+├── data/fingerprints/       → FVC2002 DB1 (subset B) sample fingerprint images
+└── database/                → server_key.bin, templates.json (both in .gitignore — generated locally)
 ```
 
-## Bilinen Sınırlamalar
+## Known Limitations
 
-- Prototip amaçlı: bağlantılar sırayla (tek thread) işleniyor, TLS yok,
-  localhost varsayımıyla sınırlı.
-- FHE istemci anahtarı makine başına tek ve küresel (çoklu kullanıcı, tek
-  anahtar — yukarıda açıklanan bilinçli tasarım kararı).
-- Öznitelik çıkarım algoritmasının ayırt ediciliği henüz zayıf (EER ~%46) —
-  bu proje asıl katkısını FHE/transciphering sistem tasarımı ve performansı
-  üzerine kuruyor; biyometrik tanıma doğruluğu dürüstçe raporlanmış bir
-  sınırlama/gelecek çalışma alanı.
+- Prototype only: connections are handled sequentially (single-threaded), no TLS,
+  limited to a localhost assumption.
+- The FHE client key is single and global per machine (multiple users,
+  one key — a deliberate design decision explained above).
+- The feature extraction algorithm's discriminative power is still weak
+  (EER ~46%) — this project's main contribution is the FHE/transciphering
+  system design and its performance, with biometric recognition accuracy
+  honestly reported as a limitation/future-work area.
 
-## Veri Seti ve Lisans
+## Dataset and License
 
-`data/fingerprints/` altındaki görüntüler FVC2002 DB1 (subset B)'den
-alınmıştır:
+The images under `data/fingerprints/` are from FVC2002 DB1 (subset B):
 
 > D. Maio, D. Maltoni, R. Cappelli, J. L. Wayman, A. K. Jain, "FVC2002:
 > Second Fingerprint Verification Competition," ICPR 2002.
 
-Yeniden dağıtım şartları için resmi kaynağın
-(biolab.csr.unibo.it/fvc2002) güncel kullanım şartları kontrol edilmelidir.
+Check the official source (biolab.csr.unibo.it/fvc2002) for current
+redistribution terms.
 
-Kodun kendisi için henüz bir açık kaynak lisansı seçilmedi.
+No open-source license has been chosen for the code itself yet.
