@@ -2,6 +2,7 @@ pub mod trivium;
 pub mod trivium_fhe;
 pub mod protocol;
 pub mod matching_fhe;
+pub mod net;
 
 // Re-exports
 pub use trivium::{Trivium, u64_to_bits_80};
@@ -17,6 +18,6 @@ pub use matching_fhe::{
 pub use protocol::{
     RegisterRequest, RegisterResponse,
     VerifyRequest, VerifyResponse,
-    // Legacy
-    AuthRequest, AuthResponse,
+    Request, Response,
 };
+pub use net::{read_message, write_message, SERVER_ADDR};

@@ -1,5 +1,4 @@
 // shared/src/matching_fhe.rs
-use tfhe::prelude::*;
 use tfhe::FheBool;
 
 #[inline]

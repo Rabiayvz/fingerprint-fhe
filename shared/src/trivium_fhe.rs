@@ -1,6 +1,5 @@
 // shared/src/trivium_fhe.rs
 
-use tfhe::prelude::*;
 use tfhe::{set_server_key, FheBool, ServerKey};
 
 /// Trivium stream cipher state under FHE (288 bits).
@@ -24,6 +23,20 @@ impl TriviumFhe {
         encrypted_iv: &[FheBool],   // 80 bits
         encrypted_true: &FheBool,
         server_key: &ServerKey,
+    ) -> Self {
+        Self::new_with_warmup_rounds(encrypted_key, encrypted_iv, encrypted_true, server_key, 1152)
+    }
+
+    /// Same as `new`, but with a configurable warm-up round count.
+    /// Used only for research stress-testing with a reduced (non-spec) warm-up
+    /// to cheaply exercise the state-update logic over many more random trials;
+    /// production code must always use `new` (1152 rounds, per spec).
+    pub fn new_with_warmup_rounds(
+        encrypted_key: &[FheBool],  // 80 bits
+        encrypted_iv: &[FheBool],   // 80 bits
+        encrypted_true: &FheBool,
+        server_key: &ServerKey,
+        warmup_rounds: usize,
     ) -> Self {
         assert_eq!(encrypted_key.len(), 80, "Key must be 80 bits");
         assert_eq!(encrypted_iv.len(), 80, "IV must be 80 bits");
@@ -73,15 +86,10 @@ impl TriviumFhe {
 
         let mut trivium = TriviumFhe { state };
 
-        // Warmup: 1152 cycles (discard output)
-        println!("   ⏳ Warmup phase (1152 cycles)...");
-        for i in 0..1152 {
-            if i % 192 == 0 && i != 0 {
-                println!("      Progress: {}/1152", i);
-            }
+        // Warmup: `warmup_rounds` cycles (discard output)
+        for _ in 0..warmup_rounds {
             let _ = trivium.clock();
         }
-        println!("   ✅ Warmup complete!");
 
         trivium
     }

@@ -1,4 +1,11 @@
 /target
 database/*.bin
 database/server_key.bin
-databse/templates.json
+database/templates.json
+
+# Yerel geliştirme notları / taslaklar - GitHub'da paylaşılmıyor
+docs/
+idea.md
+info.md
+progress.md
+dictionary.md
